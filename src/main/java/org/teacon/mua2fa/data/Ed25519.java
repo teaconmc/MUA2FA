@@ -3,7 +3,6 @@ package org.teacon.mua2fa.data;
 import com.google.common.base.Predicates;
 import com.google.common.hash.HashCode;
 import com.mojang.datafixers.util.Pair;
-import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import net.i2p.crypto.eddsa.EdDSAPrivateKey;
 import net.i2p.crypto.eddsa.EdDSAPublicKey;
@@ -14,8 +13,7 @@ import net.i2p.crypto.eddsa.spec.EdDSAPublicKeySpec;
 import net.minecraft.FieldsAreNonnullByDefault;
 import net.minecraft.MethodsReturnNonnullByDefault;
 import net.minecraft.network.FriendlyByteBuf;
-import net.minecraft.network.VarLong;
-import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.codec.StreamEncoder;
 import org.apache.logging.log4j.Marker;
 import org.apache.logging.log4j.MarkerManager;
 import org.teacon.mua2fa.MUA2FA;
@@ -104,14 +102,14 @@ public final class Ed25519 {
     }
 
     public static <T> HashCode sign(EdECPrivateKey key, Instant expire,
-                                    T input, StreamCodec<? super FriendlyByteBuf, T> codec) {
+                                    T input, StreamEncoder<? super FriendlyByteBuf, T> codec) {
         try {
             var buffer = new FriendlyByteBuf(Unpooled.buffer());
             codec.encode(buffer, input);
+            buffer.writeVarLong(expire.getEpochSecond());
             var sign = Signature.getInstance("Ed25519");
             sign.initSign(key);
             sign.update(buffer.array(), 0, buffer.writerIndex());
-            sign.update(ByteBufUtil.getBytes(VarLong.write(Unpooled.buffer(5), expire.getEpochSecond())));
             return HashCode.fromBytes(sign.sign());
         } catch (GeneralSecurityException e) {
             throw new IllegalArgumentException(e);
@@ -119,14 +117,14 @@ public final class Ed25519 {
     }
 
     public static <T> Predicate<Instant> verify(EdECPublicKey key, Instant expire, HashCode digest,
-                                                T input, StreamCodec<? super FriendlyByteBuf, T> codec) {
+                                                T input, StreamEncoder<? super FriendlyByteBuf, T> codec) {
         try {
             var buffer = new FriendlyByteBuf(Unpooled.buffer());
             codec.encode(buffer, input);
+            buffer.writeVarLong(expire.getEpochSecond());
             var sign = Signature.getInstance("Ed25519");
             sign.initVerify(key);
             sign.update(buffer.array(), 0, buffer.writerIndex());
-            sign.update(ByteBufUtil.getBytes(VarLong.write(Unpooled.buffer(5), expire.getEpochSecond())));
             return sign.verify(digest.asBytes()) ? Predicate.not(expire::isBefore) : Predicates.alwaysFalse();
         } catch (GeneralSecurityException e) {
             throw new IllegalArgumentException(e);
