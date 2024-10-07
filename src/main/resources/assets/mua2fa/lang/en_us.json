@@ -2,7 +2,7 @@
     "mua2fa.login_as_mua": "Log in as MUA Member",
     "mua2fa.not_login_as_mua": "Not Log in as MUA Member",
     "mua2fa.mua_info": "%s (MUA User: %s)",
-    "mua2fa.mua_request": "Are you MUA member? Please log in if you are (countdown: %s)",
+    "mua2fa.mua_request": "Are you MUA (Minecraft University Alliance) member? Please log in if you are (countdown: %s)",
     "mua2fa.complete_title": "MUA Authentication Completed",
     "mua2fa.complete_subtitle": "Feel Free to Close the Window",
     "mua2fa.cancel_title": "MUA Authentication Problem Arisen",
