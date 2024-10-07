@@ -112,7 +112,7 @@ public final class OAuthHttp implements Closeable {
                 var dec = new QueryStringDecoder(req.uri());
                 var decParams = dec.parameters();
                 var state = OAuthState.fromString(Iterables.getOnlyElement(decParams.getOrDefault("state", List.of())));
-                var fallback = Mono.<String>error(() -> new IllegalArgumentException("not found"));
+                var fallback = Mono.<String>error(() -> new IllegalArgumentException("time out"));
                 var users = this.records.asFlux().take(POLL_INTERVAL).flatMap(user -> {
                     var now = OffsetDateTime.now();
                     var key = conf.getTokenSignKey();
@@ -127,11 +127,12 @@ public final class OAuthHttp implements Closeable {
                 });
                 return users.next().switchIfEmpty(fallback).flatMap(s -> {
                     var header = res.header(HttpHeaderNames.CONTENT_TYPE, HttpHeaderValues.APPLICATION_JSON);
-                    MUA2FA.LOGGER.info(MARKER, "Giving the signed record for player {} ...", state.id());
+                    MUA2FA.LOGGER.info(MARKER, "Giving the signed record for player {} ...", state.name());
                     return header.sendString(Mono.just(s)).then();
                 }).onErrorResume(e -> {
                     var header = res.header(HttpHeaderNames.CONTENT_TYPE, HttpHeaderValues.APPLICATION_JSON);
-                    MUA2FA.LOGGER.warn(MARKER, "Failed to give a record to the player: {}", e.getMessage(), e);
+                    MUA2FA.LOGGER.info(MARKER, "No suitable record found for player {}, replying ...", state.name());
+                    MUA2FA.LOGGER.debug(MARKER, "No suitable record found for player: {}", e.getMessage(), e);
                     return header.status(404).sendString(Mono.just("{\"error\":\"not found\"}")).then();
                 });
             });
@@ -157,7 +158,7 @@ public final class OAuthHttp implements Closeable {
                 enc.addParam("client_id", conf.getMUAUnionAuthClientId());
                 enc.addParam("client_secret", conf.getMUAUnionAuthClientSecret());
                 enc.addParam("redirect_uri", conf.getServerExternalUri().toString());
-                MUA2FA.LOGGER.info(MARKER, "Requesting the authorization token for player {} ...", state.id());
+                MUA2FA.LOGGER.info(MARKER, "Requesting the authorization token for player {} ...", state.name());
                 var tokenClient = HttpClient.create().runOn(runOn).headers(headers -> {
                     headers.add(HttpHeaderNames.CONTENT_TYPE, HttpHeaderValues.APPLICATION_X_WWW_FORM_URLENCODED);
                     headers.add(HttpHeaderNames.ACCEPT, HttpHeaderValues.APPLICATION_JSON);
@@ -169,7 +170,7 @@ public final class OAuthHttp implements Closeable {
                 var userRes = tokenRes.flatMap(json -> {
                     var token = json.get("access_token").getAsString();
                     var tokenType = json.get("token_type").getAsString();
-                    MUA2FA.LOGGER.info(MARKER, "Requesting the user information for player {} ...", state.id());
+                    MUA2FA.LOGGER.info(MARKER, "Requesting the user information for player {} ...", state.name());
                     var userClient = HttpClient.create().runOn(runOn).headers(headers -> {
                         headers.add(HttpHeaderNames.ACCEPT, HttpHeaderValues.APPLICATION_JSON);
                         headers.add(HttpHeaderNames.AUTHORIZATION, tokenType + " " + token);
@@ -182,11 +183,11 @@ public final class OAuthHttp implements Closeable {
                     var header = res.header(HttpHeaderNames.CONTENT_TYPE, "text/html;charset=utf-8");
                     var user = MUAUser.CODEC.decode(JsonOps.INSTANCE, json).getOrThrow().getFirst();
                     this.records.emitNext(user, Sinks.EmitFailureHandler.FAIL_FAST);
-                    MUA2FA.LOGGER.info(MARKER, "Finished the oauth process of player {}, replying ...", state.id());
+                    MUA2FA.LOGGER.info(MARKER, "Finished the oauth process of player {}, replying ...", state.name());
                     return header.sendString(Mono.just(String.format(HTML, "#066805", state.completeHint()))).then();
                 }).onErrorResume(e -> {
                     var header = res.header(HttpHeaderNames.CONTENT_TYPE, "text/html;charset=utf-8");
-                    MUA2FA.LOGGER.warn(MARKER, "Exception thrown on processing responses: {}", e.getMessage(), e);
+                    MUA2FA.LOGGER.warn(MARKER, "Error thrown on processing (state: {}): {}", state, e.getMessage(), e);
                     return header.sendString(Mono.just(String.format(HTML, "#97242c", state.cancelHint()))).then();
                 });
             });
