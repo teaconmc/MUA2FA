@@ -2,7 +2,6 @@ package org.teacon.mua2fa.data;
 
 import com.google.common.base.Predicates;
 import com.google.common.hash.HashCode;
-import com.google.common.primitives.Longs;
 import com.mojang.datafixers.util.Pair;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
