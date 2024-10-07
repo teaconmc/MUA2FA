@@ -70,7 +70,7 @@ public final class OAuthHttp implements Closeable {
     private static final Scheduler IO_SCHEDULER = Schedulers.fromExecutor(Util.ioPool());
 
     private final AtomicReference<DisposableServer> server = new AtomicReference<>();
-    private final Sinks.Many<MUAUser> records = Sinks.many().replay().limit(NETWORK_TOLERANCE, IO_SCHEDULER);
+    private final Sinks.Many<MUARecord.User> records = Sinks.many().replay().limit(NETWORK_TOLERANCE, IO_SCHEDULER);
 
     private Mono<JsonObject> json(HttpClientResponse res, ByteBufMono body) {
         return body.asString().flatMap(content -> Mono.fromCallable(() -> {
@@ -181,7 +181,7 @@ public final class OAuthHttp implements Closeable {
                 });
                 return userRes.flatMap(json -> {
                     var header = res.header(HttpHeaderNames.CONTENT_TYPE, "text/html;charset=utf-8");
-                    var user = MUAUser.CODEC.decode(JsonOps.INSTANCE, json).getOrThrow().getFirst();
+                    var user = MUARecord.User.CODEC.decode(JsonOps.INSTANCE, json).getOrThrow().getFirst();
                     this.records.emitNext(user, Sinks.EmitFailureHandler.FAIL_FAST);
                     MUA2FA.LOGGER.info(MARKER, "Finished the oauth process of player {}, replying ...", state.name());
                     return header.sendString(Mono.just(String.format(HTML, "#066805", state.completeHint()))).then();

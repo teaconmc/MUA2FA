@@ -17,6 +17,7 @@ import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.util.ExtraCodecs;
 
 import javax.annotation.ParametersAreNonnullByDefault;
+import java.security.interfaces.EdECPrivateKey;
 import java.security.interfaces.EdECPublicKey;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -31,7 +32,7 @@ import java.util.function.Predicate;
 public final class MUARecord {
     public static final Codec<MUARecord> CODEC;
     public static final StreamCodec<ByteBuf, MUARecord> STREAM_CODEC;
-    public static final StreamCodec<ByteBuf, Pair<GameProfile, MUAUser>> STREAM_CODEC_PART;
+    public static final StreamCodec<ByteBuf, Pair<GameProfile, User>> STREAM_CODEC_PART;
 
     static {
         CODEC = RecordCodecBuilder.create(builder -> builder.group(
@@ -39,27 +40,27 @@ public final class MUARecord {
                                         UUIDUtil.AUTHLIB_CODEC.fieldOf("id").forGetter(GameProfile::getId),
                                         ExtraCodecs.PLAYER_NAME.fieldOf("name").forGetter(GameProfile::getName))
                                 .apply(b, GameProfile::new)).forGetter(MUARecord::getProfile),
-                        MUAUser.CODEC.fieldOf("mua").forGetter(MUARecord::getUser),
+                        User.CODEC.fieldOf("mua").forGetter(MUARecord::getUser),
                         Codec.list(SignEntry.CODEC).fieldOf("signatures").forGetter(MUARecord::getSignatures))
                 .apply(builder, MUARecord::new));
         STREAM_CODEC = StreamCodec.composite(
-                ByteBufCodecs.GAME_PROFILE, MUARecord::getProfile, MUAUser.STREAM_CODEC, MUARecord::getUser,
+                ByteBufCodecs.GAME_PROFILE, MUARecord::getProfile, User.STREAM_CODEC, MUARecord::getUser,
                 SignEntry.STREAM_CODEC.apply(ByteBufCodecs.list()), MUARecord::getSignatures, MUARecord::new);
         STREAM_CODEC_PART = StreamCodec.composite(
-                ByteBufCodecs.GAME_PROFILE, Pair::getFirst, MUAUser.STREAM_CODEC, Pair::getSecond, Pair::of);
+                ByteBufCodecs.GAME_PROFILE, Pair::getFirst, User.STREAM_CODEC, Pair::getSecond, Pair::of);
     }
 
-    private final MUAUser user;
+    private final User user;
     private final GameProfile profile;
     private final List<SignEntry> signatures;
 
-    public MUARecord(GameProfile profile, MUAUser user, Collection<? extends SignEntry> signatures) {
+    public MUARecord(GameProfile profile, User user, Collection<? extends SignEntry> signatures) {
         this.user = user;
         this.profile = profile;
         this.signatures = List.copyOf(signatures);
     }
 
-    public MUAUser getUser() {
+    public User getUser() {
         return this.user;
     }
 
@@ -161,6 +162,31 @@ public final class MUARecord {
 
         public HashCode getSignature() {
             return this.signature;
+        }
+    }
+
+    @FieldsAreNonnullByDefault
+    @MethodsReturnNonnullByDefault
+    @ParametersAreNonnullByDefault
+    public record User(String sub, String nickname, String email) {
+        public static final Codec<User> CODEC;
+        public static final StreamCodec<ByteBuf, User> STREAM_CODEC;
+
+        static {
+            CODEC = RecordCodecBuilder.create(builder -> builder.group(
+                    Codec.STRING.fieldOf("sub").forGetter(User::sub),
+                    Codec.STRING.fieldOf("nickname").forGetter(User::nickname),
+                    Codec.STRING.fieldOf("email").forGetter(User::email)).apply(builder, User::new));
+            STREAM_CODEC = StreamCodec.composite(
+                    ByteBufCodecs.STRING_UTF8, User::sub,
+                    ByteBufCodecs.STRING_UTF8, User::nickname,
+                    ByteBufCodecs.STRING_UTF8, User::email, User::new);
+        }
+
+        public MUARecord sign(GameProfile profile, Instant expire, Pair<EdECPublicKey, EdECPrivateKey> keys) {
+            var keyBytes = Ed25519.serialize(keys.getFirst());
+            var signature = Ed25519.sign(keys.getSecond(), expire, Pair.of(profile, this), STREAM_CODEC_PART);
+            return new MUARecord(profile, this, List.of(new SignEntry(keyBytes, expire, signature)));
         }
     }
 }
