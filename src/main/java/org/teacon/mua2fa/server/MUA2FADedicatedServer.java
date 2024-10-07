@@ -90,10 +90,11 @@ public final class MUA2FADedicatedServer {
                         });
                         var ddl = session.deadline();
                         var key = config.getTokenSignKey();
+                        var duration = Duration.between(now, ddl);
                         var u1 = OAuthHttp.auth(config).toString();
                         var u2 = OAuthHttp.record(config).toString();
-                        var duration = Duration.between(now, ddl);
-                        var state = OAuthState.sign(profile, ddl.plus(OAuthHttp.POLL_INTERVAL), key.getSecond());
+                        var expire = ddl.plus(OAuthHttp.POLL_INTERVAL);
+                        var state = OAuthState.sign(profile.getId(), profile.getName(), expire, key.getSecond());
                         sender.accept(new RequestForClientRecordPacket(key.getFirst(), duration, false, u1, u2, state));
                     });
                 }
@@ -182,7 +183,8 @@ public final class MUA2FADedicatedServer {
                 var duration = Duration.between(now, ddl);
                 var u1 = OAuthHttp.auth(this.config).toString();
                 var u2 = OAuthHttp.record(this.config).toString();
-                var state = OAuthState.sign(profile, ddl.plus(OAuthHttp.NETWORK_TOLERANCE), key.getSecond());
+                var expire = ddl.plus(OAuthHttp.NETWORK_TOLERANCE);
+                var state = OAuthState.sign(profile.getId(), profile.getName(), expire, key.getSecond());
                 context.reply(new RequestForClientRecordPacket(key.getFirst(), duration, true, u1, u2, state));
             } else {
                 context.disconnect(Component.translatable("disconnect.timeout"));

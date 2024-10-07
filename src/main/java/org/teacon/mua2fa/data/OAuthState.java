@@ -41,9 +41,9 @@ public record OAuthState(UUID id, String name, Instant expire,
                 ByteBufCodecs.stringUtf8(16383), OAuthState::completeHint, OAuthState::new);
     }
 
-    public static OAuthState sign(GameProfile profile, Instant expire, EdECPrivateKey key) {
-        var signature = Ed25519.sign(key, expire, profile, ByteBufCodecs.GAME_PROFILE);
-        return new OAuthState(profile.getId(), profile.getName(), expire, signature, "", "");
+    public static OAuthState sign(UUID id, String name, Instant expire, EdECPrivateKey key) {
+        var signature = Ed25519.sign(key, expire, new GameProfile(id, name), ByteBufCodecs.GAME_PROFILE);
+        return new OAuthState(id, name, expire, signature, "", "");
     }
 
     public Predicate<Instant> verify(EdECPublicKey key) {
