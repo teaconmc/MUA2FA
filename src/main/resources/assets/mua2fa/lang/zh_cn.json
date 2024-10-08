@@ -2,7 +2,7 @@
     "mua2fa.login_as_mua": "以 MUA 成员身份登录",
     "mua2fa.not_login_as_mua": "不以 MUA 成员身份登录",
     "mua2fa.mua_info": "%s（MUA 成员：%s）",
-    "mua2fa.mua_request": "你是 MUA（高效联盟）成员吗？如果是，请登录（倒计时：%s）",
+    "mua2fa.mua_request": "你是 MUA（高校联盟）成员吗？如果是，请登录（倒计时：%s）",
     "mua2fa.complete_title": "MUA 认证已完成",
     "mua2fa.complete_subtitle": "您可放心地关闭该窗口",
     "mua2fa.cancel_title": "MUA 认证出现问题",
