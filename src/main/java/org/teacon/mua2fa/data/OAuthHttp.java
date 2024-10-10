@@ -6,11 +6,11 @@ import com.google.gson.JsonObject;
 import com.google.gson.internal.Streams;
 import com.google.gson.stream.JsonReader;
 import com.mojang.authlib.GameProfile;
+import com.mojang.datafixers.util.Either;
 import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.DataResult;
 import com.mojang.serialization.JsonOps;
 import io.netty.handler.codec.http.HttpHeaderNames;
-import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.QueryStringDecoder;
 import io.netty.handler.codec.http.QueryStringEncoder;
 import net.minecraft.FieldsAreNonnullByDefault;
@@ -23,6 +23,7 @@ import org.apache.logging.log4j.Marker;
 import org.apache.logging.log4j.MarkerManager;
 import org.teacon.mua2fa.MUA2FA;
 import org.teacon.mua2fa.server.ConfigSpec;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Scheduler;
@@ -42,8 +43,12 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.netty.handler.codec.http.HttpHeaderValues.APPLICATION_JSON;
+import static io.netty.handler.codec.http.HttpHeaderValues.APPLICATION_X_WWW_FORM_URLENCODED;
 import static net.minecraft.server.network.ServerConnectionListener.SERVER_EPOLL_EVENT_GROUP;
 import static net.minecraft.server.network.ServerConnectionListener.SERVER_EVENT_GROUP;
 
@@ -72,13 +77,30 @@ public final class OAuthHttp implements Closeable {
     private final AtomicReference<DisposableServer> server = new AtomicReference<>();
     private final Sinks.Many<MUARecord.User> records = Sinks.many().replay().limit(NETWORK_TOLERANCE, IO_SCHEDULER);
 
-    private Mono<JsonObject> json(HttpClientResponse res, ByteBufMono body) {
+    private static Mono<JsonObject> json(HttpClientResponse res, ByteBufMono body) {
         return body.asString().flatMap(content -> Mono.fromCallable(() -> {
             Preconditions.checkArgument(res.status().code() == 200);
             try (var reader = new JsonReader(new StringReader(content))) {
                 return Streams.parse(reader).getAsJsonObject();
             }
         }));
+    }
+
+    private static Either<OAuthState, Exception> state(Map<String, List<String>> params) {
+        try {
+            var stateStr = Iterables.getOnlyElement(params.getOrDefault("state", List.of()));
+            return Either.left(OAuthState.fromString(stateStr));
+        } catch (IllegalArgumentException | NoSuchElementException e) {
+            return Either.right(e);
+        }
+    }
+
+    private static Either<String, Exception> code(Map<String, List<String>> params) {
+        try {
+            return Either.left(Iterables.getOnlyElement(params.getOrDefault("code", List.of())));
+        } catch (IllegalArgumentException | NoSuchElementException e) {
+            return Either.right(e);
+        }
     }
 
     public static URI auth(ConfigSpec conf) {
@@ -93,7 +115,7 @@ public final class OAuthHttp implements Closeable {
 
     public static Mono<MUARecord> poll(URI recordUri, String ua, Duration interval) {
         var client = HttpClient.create().headers(headers -> {
-            headers.add(HttpHeaderNames.ACCEPT, HttpHeaderValues.APPLICATION_JSON);
+            headers.add(HttpHeaderNames.ACCEPT, APPLICATION_JSON);
             headers.add(HttpHeaderNames.USER_AGENT, ua);
         });
         var single = client.get().uri(recordUri.toString()).responseSingle((res, mono) -> {
@@ -110,85 +132,117 @@ public final class OAuthHttp implements Closeable {
         var server = HttpServer.create().runOn(runOn).host(addr.getHost()).port(addr.getPort()).route(routes -> {
             routes.get("/record", (req, res) -> {
                 var dec = new QueryStringDecoder(req.uri());
-                var decParams = dec.parameters();
-                var state = OAuthState.fromString(Iterables.getOnlyElement(decParams.getOrDefault("state", List.of())));
-                var fallback = Mono.<String>error(() -> new IllegalArgumentException("time out"));
-                var users = this.records.asFlux().take(POLL_INTERVAL).flatMap(user -> {
+                var stateEither = state(dec.parameters());
+                var users = stateEither.swap().<Flux<String>>map(Flux::error, state -> {
                     var now = OffsetDateTime.now();
                     var key = conf.getTokenSignKey();
-                    if (state.verify(key.getFirst()).test(now.toInstant())) {
-                        var expire = now.plus(conf.getTokenValidityPeriod());
-                        var profile = new GameProfile(state.id(), state.name());
+                    var verified = state.verify(key.getFirst()).test(now.toInstant());
+                    if (!verified) {
+                        return Flux.error(new IllegalArgumentException("invalid signature for state: " + state));
+                    }
+                    var expire = now.plus(conf.getTokenValidityPeriod());
+                    var profile = new GameProfile(state.id(), state.name());
+                    return this.records.asFlux().take(POLL_INTERVAL).flatMap(user -> Mono.fromCallable(() -> {
                         var record = user.sign(profile, expire.toInstant(), key);
                         var result = MUARecord.CODEC.encodeStart(JsonOps.INSTANCE, record);
-                        return Mono.just(GsonHelper.toStableString(result.getOrThrow()));
-                    }
-                    return Mono.empty();
+                        return GsonHelper.toStableString(result.getOrThrow());
+                    }));
                 });
-                return users.next().switchIfEmpty(fallback).flatMap(s -> {
-                    var header = res.header(HttpHeaderNames.CONTENT_TYPE, HttpHeaderValues.APPLICATION_JSON);
-                    MUA2FA.LOGGER.info(MARKER, "Giving the signed record for player {} ...", state.name());
+                var name = stateEither.map(OAuthState::name, e -> "???");
+                return users.next().switchIfEmpty(Mono.defer(() -> {
+                    var header = res.header(HttpHeaderNames.CONTENT_TYPE, APPLICATION_JSON);
+                    MUA2FA.LOGGER.info(MARKER, "No suitable record found for player {}, replying ...", name);
+                    return header.status(404).sendString(Mono.just("{\"error\":\"not found\"}")).then();
+                }).then(Mono.empty())).flatMap(s -> {
+                    var header = res.header(HttpHeaderNames.CONTENT_TYPE, APPLICATION_JSON);
+                    MUA2FA.LOGGER.info(MARKER, "Giving the signed record for player {} ...", name);
                     return header.sendString(Mono.just(s)).then();
                 }).onErrorResume(e -> {
-                    var header = res.header(HttpHeaderNames.CONTENT_TYPE, HttpHeaderValues.APPLICATION_JSON);
-                    MUA2FA.LOGGER.info(MARKER, "No suitable record found for player {}, replying ...", state.name());
-                    MUA2FA.LOGGER.debug(MARKER, "No suitable record found for player: {}", e.getMessage(), e);
-                    return header.status(404).sendString(Mono.just("{\"error\":\"not found\"}")).then();
+                    var header = res.header(HttpHeaderNames.CONTENT_TYPE, APPLICATION_JSON);
+                    MUA2FA.LOGGER.info(MARKER, "Error thrown when signing a record for player {}, replying ...", name);
+                    MUA2FA.LOGGER.debug(MARKER, "Error thrown on processing: {}", e.getMessage(), e);
+                    return header.status(400).sendString(Mono.just("{\"error\":\"bad request\"}")).then();
                 });
             });
             routes.get("/redirect", (req, res) -> {
                 var dec = new QueryStringDecoder(req.uri());
-                var decParams = dec.parameters();
-                var state = OAuthState.fromString(Iterables.getOnlyElement(decParams.getOrDefault("state", List.of())));
+                var stateEither = state(dec.parameters());
                 var enc = new QueryStringEncoder("/api/union/oauth2/authorize");
                 enc.addParam("response_type", "code");
                 enc.addParam("client_id", conf.getMUAUnionAuthClientId());
                 enc.addParam("redirect_uri", conf.getServerExternalUri().toString());
-                enc.addParam("state", state.toString());
-                MUA2FA.LOGGER.info(MARKER, "Redirecting player {} to mua union auth page ...", state.id());
+                stateEither.ifLeft(state -> enc.addParam("state", state.toString()));
+                var name = stateEither.map(OAuthState::name, e -> "???");
+                MUA2FA.LOGGER.info(MARKER, "Redirecting player {} to mua union auth page ...", name);
                 return res.sendRedirect("https://" + MUA2FA.MUA_HOST + enc);
             });
             routes.get("/", (req, res) -> {
                 var dec = new QueryStringDecoder(req.uri());
-                var decParams = dec.parameters();
-                var state = OAuthState.fromString(Iterables.getOnlyElement(decParams.getOrDefault("state", List.of())));
+                var stateEither = state(dec.parameters());
+                var codeEither = code(dec.parameters());
                 var enc = new QueryStringEncoder("/");
                 enc.addParam("grant_type", "authorization_code");
-                enc.addParam("code", Iterables.getOnlyElement(decParams.getOrDefault("code", List.of())));
+                codeEither.ifLeft(code -> enc.addParam("code", code));
                 enc.addParam("client_id", conf.getMUAUnionAuthClientId());
                 enc.addParam("client_secret", conf.getMUAUnionAuthClientSecret());
                 enc.addParam("redirect_uri", conf.getServerExternalUri().toString());
-                MUA2FA.LOGGER.info(MARKER, "Requesting the authorization token for player {} ...", state.name());
-                var tokenClient = HttpClient.create().runOn(runOn).headers(headers -> {
-                    headers.add(HttpHeaderNames.CONTENT_TYPE, HttpHeaderValues.APPLICATION_X_WWW_FORM_URLENCODED);
-                    headers.add(HttpHeaderNames.ACCEPT, HttpHeaderValues.APPLICATION_JSON);
-                    headers.add(HttpHeaderNames.USER_AGENT, ua);
+                var name = stateEither.map(OAuthState::name, e -> "???");
+                var tokenRes = stateEither.swap().<Mono<JsonObject>>map(Mono::error, state -> {
+                    var now = OffsetDateTime.now();
+                    var key = conf.getTokenSignKey();
+                    var verified = state.verify(key.getFirst()).test(now.toInstant());
+                    if (!verified) {
+                        return Mono.error(new IllegalArgumentException("invalid signature for state: " + state));
+                    }
+                    MUA2FA.LOGGER.info(MARKER, "Requesting the authorization token for player {} ...", name);
+                    var tokenClient = HttpClient.create().runOn(runOn).headers(headers -> {
+                        headers.add(HttpHeaderNames.CONTENT_TYPE, APPLICATION_X_WWW_FORM_URLENCODED);
+                        headers.add(HttpHeaderNames.ACCEPT, APPLICATION_JSON);
+                        headers.add(HttpHeaderNames.USER_AGENT, ua);
+                    });
+                    var tokenUri = "https://" + MUA2FA.MUA_HOST + "/api/union/oauth2/token";
+                    var tokenBody = ByteBufFlux.fromString(Mono.fromCallable(() -> enc.toUri().getQuery()));
+                    return tokenClient.post().uri(tokenUri).send(tokenBody).responseSingle(OAuthHttp::json);
                 });
-                var tokenUri = "https://" + MUA2FA.MUA_HOST + "/api/union/oauth2/token";
-                var tokenBody = ByteBufFlux.fromString(Mono.fromCallable(() -> enc.toUri().getQuery()));
-                var tokenRes = tokenClient.post().uri(tokenUri).send(tokenBody).responseSingle(this::json);
-                var userRes = tokenRes.flatMap(json -> {
+                var tokenStr = tokenRes.flatMap(json -> Mono.fromCallable(() -> {
                     var token = json.get("access_token").getAsString();
                     var tokenType = json.get("token_type").getAsString();
-                    MUA2FA.LOGGER.info(MARKER, "Requesting the user information for player {} ...", state.name());
+                    Preconditions.checkArgument("bearer".equalsIgnoreCase(tokenType));
+                    return tokenType + " " + token;
+                }));
+                var userRes = tokenStr.flatMap(str -> {
+                    MUA2FA.LOGGER.info(MARKER, "Requesting the user information for player {} ...", name);
                     var userClient = HttpClient.create().runOn(runOn).headers(headers -> {
-                        headers.add(HttpHeaderNames.ACCEPT, HttpHeaderValues.APPLICATION_JSON);
-                        headers.add(HttpHeaderNames.AUTHORIZATION, tokenType + " " + token);
+                        headers.add(HttpHeaderNames.ACCEPT, APPLICATION_JSON);
+                        headers.add(HttpHeaderNames.AUTHORIZATION, str);
                         headers.add(HttpHeaderNames.USER_AGENT, ua);
                     });
                     var userUri = "https://" + MUA2FA.MUA_HOST + "/api/union/oauth2/user";
-                    return userClient.get().uri(userUri).responseSingle(this::json);
+                    return userClient.get().uri(userUri).responseSingle(OAuthHttp::json);
                 });
-                return userRes.flatMap(json -> {
+                var userObj = userRes.flatMap(json -> Mono.fromCallable(() -> {
+                    var result = MUARecord.User.CODEC.decode(JsonOps.INSTANCE, json);
+                    return result.getOrThrow().getFirst();
+                }));
+                return Mono.zip(userObj, stateEither.map(Mono::just, Mono::error), Pair::of).flatMap(pair -> {
+                    MUA2FA.LOGGER.info(MARKER, "Finished the oauth process of player {}, replying ...", name);
+                    var hint = pair.getSecond().completeHint();
                     var header = res.header(HttpHeaderNames.CONTENT_TYPE, "text/html;charset=utf-8");
-                    var user = MUARecord.User.CODEC.decode(JsonOps.INSTANCE, json).getOrThrow().getFirst();
-                    this.records.emitNext(user, Sinks.EmitFailureHandler.FAIL_FAST);
-                    MUA2FA.LOGGER.info(MARKER, "Finished the oauth process of player {}, replying ...", state.name());
-                    return header.sendString(Mono.just(String.format(HTML, "#066805", state.completeHint()))).then();
+                    this.records.emitNext(pair.getFirst(), Sinks.EmitFailureHandler.FAIL_FAST);
+                    return header.sendString(Mono.just(String.format(HTML, "#066805", hint))).then();
                 }).onErrorResume(e -> {
-                    var header = res.header(HttpHeaderNames.CONTENT_TYPE, "text/html;charset=utf-8");
-                    MUA2FA.LOGGER.warn(MARKER, "Error thrown on processing (state: {}): {}", state, e.getMessage(), e);
-                    return header.sendString(Mono.just(String.format(HTML, "#97242c", state.cancelHint()))).then();
+                    MUA2FA.LOGGER.info(MARKER, "Error thrown of the oauth process for player {}, replying ...", name);
+                    return stateEither.map(s -> {
+                        var hint = s.cancelHint();
+                        var header = res.header(HttpHeaderNames.CONTENT_TYPE, "text/html;charset=utf-8");
+                        MUA2FA.LOGGER.warn(MARKER, "Error thrown on processing (state: {}): {}", s, e.getMessage(), e);
+                        return header.status(400).sendString(Mono.just(String.format(HTML, "#97242c", hint))).then();
+                    }, ignored -> {
+                        var hint = "Bad Request";
+                        var header = res.header(HttpHeaderNames.CONTENT_TYPE, "text/html;charset=utf-8");
+                        MUA2FA.LOGGER.warn(MARKER, "Error thrown on processing (state: ???): {}", e.getMessage(), e);
+                        return header.status(400).sendString(Mono.just(String.format(HTML, "#97242c", hint))).then();
+                    });
                 });
             });
         });
