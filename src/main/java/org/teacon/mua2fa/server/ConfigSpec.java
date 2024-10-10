@@ -137,7 +137,7 @@ public final class ConfigSpec implements IConfigSpec {
             result.put(SERVER_EXTERNAL_URI, "http://localhost:58888/");
         }
         if (!(config.get(SERVER_INTERNAL_ADDRESS) instanceof String s4) || parseHostAndPort(s4).isEmpty()) {
-            result.put(SERVER_INTERNAL_ADDRESS, "localhost:58888");
+            result.put(SERVER_INTERNAL_ADDRESS, "0.0.0.0:58888");
         }
         if (!(config.get(MUA_REQUIRE_UNION_AUTH) instanceof Boolean)) {
             result.put(MUA_REQUIRE_UNION_AUTH, Boolean.FALSE);
