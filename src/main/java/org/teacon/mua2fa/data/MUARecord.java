@@ -7,6 +7,7 @@ import com.google.common.hash.HashCode;
 import com.mojang.authlib.GameProfile;
 import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.Codec;
+import com.mojang.serialization.MapCodec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 import io.netty.buffer.ByteBuf;
 import net.minecraft.FieldsAreNonnullByDefault;
@@ -30,12 +31,12 @@ import java.util.function.Predicate;
 @MethodsReturnNonnullByDefault
 @ParametersAreNonnullByDefault
 public final class MUARecord {
-    public static final Codec<MUARecord> CODEC;
+    public static final MapCodec<MUARecord> MAP_CODEC;
     public static final StreamCodec<ByteBuf, MUARecord> STREAM_CODEC;
     public static final StreamCodec<ByteBuf, Pair<GameProfile, User>> STREAM_CODEC_PART;
 
     static {
-        CODEC = RecordCodecBuilder.create(builder -> builder.group(
+        MAP_CODEC = RecordCodecBuilder.mapCodec(builder -> builder.group(
                         RecordCodecBuilder.<GameProfile>mapCodec(b -> b.group(
                                         UUIDUtil.AUTHLIB_CODEC.fieldOf("id").forGetter(GameProfile::getId),
                                         ExtraCodecs.PLAYER_NAME.fieldOf("name").forGetter(GameProfile::getName))

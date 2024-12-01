@@ -8,6 +8,7 @@ import com.google.gson.stream.JsonReader;
 import com.mojang.authlib.GameProfile;
 import com.mojang.datafixers.util.Either;
 import com.mojang.datafixers.util.Pair;
+import com.mojang.serialization.Codec;
 import com.mojang.serialization.DataResult;
 import com.mojang.serialization.JsonOps;
 import io.netty.handler.codec.http.HttpHeaderNames;
@@ -74,6 +75,8 @@ public final class OAuthHttp implements Closeable {
 
     private static final Scheduler IO_SCHEDULER = Schedulers.fromExecutor(Util.ioPool());
 
+    private static final Codec<MUARecord> RECORD_CODEC = MUARecord.MAP_CODEC.codec();
+
     private final AtomicReference<DisposableServer> server = new AtomicReference<>();
     private final Sinks.Many<MUARecord.User> records = Sinks.many().replay().limit(NETWORK_TOLERANCE, IO_SCHEDULER);
 
@@ -120,7 +123,7 @@ public final class OAuthHttp implements Closeable {
         });
         var single = client.get().uri(recordUri.toString()).responseSingle((res, mono) -> {
             var json = mono.asString(StandardCharsets.UTF_8).map(GsonHelper::parse);
-            var result = json.map(o -> MUARecord.CODEC.decode(JsonOps.INSTANCE, o));
+            var result = json.map(o -> RECORD_CODEC.decode(JsonOps.INSTANCE, o));
             return result.map(DataResult::getOrThrow).map(Pair::getFirst);
         });
         return Mono.zip(Mono.delay(interval), single, (a, b) -> b).retry();
@@ -144,7 +147,7 @@ public final class OAuthHttp implements Closeable {
                     var profile = new GameProfile(state.id(), state.name());
                     return this.records.asFlux().take(POLL_INTERVAL).flatMap(user -> Mono.fromCallable(() -> {
                         var record = user.sign(profile, expire.toInstant(), key);
-                        var result = MUARecord.CODEC.encodeStart(JsonOps.INSTANCE, record);
+                        var result = RECORD_CODEC.encodeStart(JsonOps.INSTANCE, record);
                         return GsonHelper.toStableString(result.getOrThrow());
                     }));
                 });

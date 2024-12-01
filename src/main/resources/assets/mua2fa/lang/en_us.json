@@ -1,6 +1,7 @@
 {
     "mua2fa.login_as_mua": "Log in as MUA Member",
-    "mua2fa.not_login_as_mua": "Not Log in as MUA Member",
+    "mua2fa.not_login_as_mua": "Skip Logging in as MUA Member",
+    "mua2fa.not_login_as_mua_forever": "Skip Logging in (Don't Remind me Again)",
     "mua2fa.mua_info": "%s (MUA User: %s)",
     "mua2fa.mua_request": "Are you MUA (Minecraft University Alliance) member? Please log in if you are (countdown: %s)",
     "mua2fa.complete_title": "MUA Authentication Completed",

@@ -1,6 +1,8 @@
 package org.teacon.mua2fa.client;
 
-import com.mojang.datafixers.util.Pair;
+import com.google.common.base.Preconditions;
+import com.mojang.datafixers.util.Either;
+import com.mojang.serialization.Codec;
 import net.minecraft.FieldsAreNonnullByDefault;
 import net.minecraft.MethodsReturnNonnullByDefault;
 import net.minecraft.Util;
@@ -17,7 +19,6 @@ import net.minecraft.network.chat.Component;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.ScreenEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
-import org.apache.commons.lang3.function.BooleanConsumer;
 import org.apache.commons.lang3.stream.Streams;
 import org.apache.http.client.utils.URIBuilder;
 import org.apache.logging.log4j.Marker;
@@ -42,8 +43,11 @@ import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 
 @FieldsAreNonnullByDefault
 @MethodsReturnNonnullByDefault
@@ -51,12 +55,19 @@ import java.util.function.Consumer;
 public final class ConnectionScreenListener {
     private static final Marker MARKER = MarkerManager.getMarker("Connection");
 
+    private static final Codec<Either<MUARecord, MUAEmptyState>> CODEC;
+
+    static {
+        CODEC = Codec.mapEither(MUARecord.MAP_CODEC,
+                MUAEmptyState.CODEC.optionalFieldOf("state", MUAEmptyState.INIT)).codec();
+    }
+
     private @Nullable URI authUri;
     private @Nullable URI recordUri;
-    private @Nullable MUARecord record;
     private @Nullable Disposable recordPolls;
     private @Nullable Instant muaRequestExpire;
     private Consumer<Component> updateConnectionMessage = Objects::hash;
+    private Either<MUARecord, MUAEmptyState> data = Either.right(MUAEmptyState.INIT);
 
     private final Buttons buttons;
     private final String userAgent;
@@ -99,8 +110,8 @@ public final class ConnectionScreenListener {
         }
     }
 
-    public void click(boolean login, OAuthState state, IPayloadContext context) {
-        if (login && this.authUri != null) {
+    public void click(int index, OAuthState state, IPayloadContext context) {
+        if (index == Buttons.AUTH && this.authUri != null) {
             if (this.recordUri != null && this.recordPolls == null) {
                 var poll = OAuthHttp.poll(this.recordUri, this.userAgent, Duration.ofSeconds(3L));
                 this.recordPolls = poll.subscribe(record -> context.enqueueWork(() -> {
@@ -117,6 +128,13 @@ public final class ConnectionScreenListener {
                 this.recordPolls.dispose();
                 this.recordPolls = null;
             }
+            if (index == Buttons.SKIP_FOREVER) {
+                this.data = Either.right(MUAEmptyState.HIDE_FOREVER);
+                this.save();
+            } else {
+                this.data = this.data.mapRight(e -> MUAEmptyState.SHOW_IF_NECESSARY);
+                this.save();
+            }
             context.reply(new ResponseToServerCancelPacket(state));
             this.updateConnectionMessage.accept(Component.translatable("connect.joining"));
         }
@@ -125,17 +143,29 @@ public final class ConnectionScreenListener {
     public void handle(RequestForClientRecordPacket packet, IPayloadContext context) {
         context.enqueueWork(() -> {
             var profile = Minecraft.getInstance().getGameProfile();
-            if (this.record != null) {
-                var bypass = !packet.forceRefresh() && this.record.verify(profile, packet.key()).test(Instant.now());
-                if (bypass) {
-                    context.reply(new ResponseToServerRecordPacket(this.record));
-                    return;
-                }
-            }
-            this.muaRequestExpire = Instant.now().plus(packet.duration());
+            // append hints to the oauth state
             var cancelHint = I18n.get("mua2fa.cancel_title") + "\n" + I18n.get("mua2fa.cancel_subtitle");
             var completeHint = I18n.get("mua2fa.complete_title") + "\n" + I18n.get("mua2fa.complete_subtitle");
             var state = packet.state().with(cancelHint, completeHint);
+            // bypass if the record is valid now
+            var recordToBypass = this.data.left().filter(record -> {
+                if (packet.forceRefresh()) {
+                    return false; // bypassing is disabled if the packet from the server requires this
+                }
+                return record.verify(profile, packet.key()).test(Instant.now());
+            });
+            if (recordToBypass.isPresent()) {
+                context.reply(new ResponseToServerRecordPacket(recordToBypass.get()));
+                return;
+            }
+            // bypass if the record is empty and hide forever is chosen
+            var emptyToBypass = this.data.right().filter(MUAEmptyState.HIDE_FOREVER::equals);
+            if (emptyToBypass.isPresent()) {
+                context.reply(new ResponseToServerCancelPacket(state));
+                return;
+            }
+            // set the expiration timestamp and urls
+            this.muaRequestExpire = Instant.now().plus(packet.duration());
             try {
                 var recordBuilder = new URIBuilder(Util.parseAndValidateUntrustedUri(packet.recordBaseUri()));
                 var authBuilder = new URIBuilder(Util.parseAndValidateUntrustedUri(packet.authBaseUri()));
@@ -146,13 +176,15 @@ public final class ConnectionScreenListener {
                 this.recordPolls = null;
                 this.authUri = null;
             }
-            this.buttons.show(state, context);
+            // show the mua request screen
+            var includeHideForever = !this.data.right().orElse(MUAEmptyState.INIT).equals(MUAEmptyState.INIT);
+            this.buttons.show(state, includeHideForever, context);
         });
     }
 
     public void handle(RequestForClientRefreshPacket packet, IPayloadContext context) {
         context.enqueueWork(() -> {
-            this.record = this.record == null ? packet.record() : this.record.refresh(packet.record());
+            this.data = Either.left(this.data.map(r -> r.refresh(packet.record()), e -> packet.record()));
             this.save();
             this.buttons.hide();
             this.buttons.close();
@@ -162,9 +194,9 @@ public final class ConnectionScreenListener {
                 this.recordPolls = null;
             }
             var message = Component.translatable("connect.joining");
-            if (this.record != null) {
-                var user = this.record.getUser();
-                message = Component.translatable("mua2fa.mua_info", message, user.nickname());
+            var user = this.data.left().map(MUARecord::getUser);
+            if (user.isPresent()) {
+                message = Component.translatable("mua2fa.mua_info", message, user.get().nickname());
             }
             this.updateConnectionMessage.accept(message);
         });
@@ -173,13 +205,8 @@ public final class ConnectionScreenListener {
     public void load() {
         try {
             var gameDir = Minecraft.getInstance().gameDirectory.toPath();
-            var data = NbtIo.read(gameDir.resolve("mua2fa.dat"));
-            if (data != null && !data.isEmpty()) {
-                var record = MUARecord.CODEC.decode(NbtOps.INSTANCE, data).getOrThrow(IOException::new);
-                this.record = record.getFirst();
-            } else {
-                this.record = null;
-            }
+            var data = Objects.requireNonNullElse(NbtIo.read(gameDir.resolve("mua2fa.dat")), new CompoundTag());
+            this.data = CODEC.decode(NbtOps.INSTANCE, data).getOrThrow(IOException::new).getFirst();
         } catch (IOException e) {
             MUA2FA.LOGGER.warn(MARKER, "Failed to load mua2fa data", e);
         }
@@ -188,14 +215,11 @@ public final class ConnectionScreenListener {
     public void save() {
         try {
             var gameDir = Minecraft.getInstance().gameDirectory.toPath();
-            var tmp = Files.createTempFile(gameDir, "mua2fa", ".dat");
-            var data = new CompoundTag();
-            if (this.record != null) {
-                var filtered = this.record.filter(Instant.now());
-                data = (CompoundTag) MUARecord.CODEC.encode(filtered, NbtOps.INSTANCE, data).getOrThrow();
-            }
-            NbtIo.write(data, tmp);
-            Util.safeReplaceFile(gameDir.resolve("mua2fa.dat"), tmp, gameDir.resolve("mua2fa.dat_old"));
+            var tmpPath = Files.createTempFile(gameDir, "mua2fa", ".dat");
+            var filtered = this.data.mapLeft(r -> r.filter(Instant.now()));
+            var result = CODEC.encode(filtered, NbtOps.INSTANCE, new CompoundTag());
+            NbtIo.write((CompoundTag) result.getOrThrow(), tmpPath);
+            Util.safeReplaceFile(gameDir.resolve("mua2fa.dat"), tmpPath, gameDir.resolve("mua2fa.dat_old"));
         } catch (IOException | IllegalStateException | ClassCastException e) {
             MUA2FA.LOGGER.warn(MARKER, "Failed to save mua2fa data", e);
         }
@@ -204,77 +228,117 @@ public final class ConnectionScreenListener {
     @FieldsAreNonnullByDefault
     @MethodsReturnNonnullByDefault
     @ParametersAreNonnullByDefault
+    private record MUAClientSession(OAuthState state, boolean includeHideForever, IPayloadContext context) {
+        // nothing here
+    }
+
+    @FieldsAreNonnullByDefault
+    @MethodsReturnNonnullByDefault
+    @ParametersAreNonnullByDefault
     private static final class Buttons implements Closeable {
+        public static final int AUTH = 0, SKIP = 1, SKIP_FOREVER = 2, SIZE = 3;
+
         private static final Component MUA = Component.translatable("mua2fa.login_as_mua");
         private static final Component NOT_MUA = Component.translatable("mua2fa.not_login_as_mua");
+        private static final Component NOT_MUA_FOREVER = Component.translatable("mua2fa.not_login_as_mua_forever");
 
-        private BooleanConsumer click = BooleanConsumer.nop();
-        private @Nullable Pair<OAuthState, IPayloadContext> connection;
+        private @Nullable MUAClientSession session;
+        private IntConsumer click = i -> Preconditions.checkState(i >= 0 && i <= SIZE);
 
-        private final Button[] additional = new Button[2];
-        private final BitSet existingVisible = new BitSet(1);
-        private final List<AbstractButton> existing = new ArrayList<>(1);
+        private final Button[] appended = new Button[SIZE];
+        private final List<ButtonExisting> existing = new ArrayList<>(1);
 
         public void open(ButtonsCallback callback) {
-            this.connection = null;
-            this.click = login -> {
-                if (this.connection != null) {
-                    callback.on(login, this.connection.getFirst(), this.connection.getSecond());
+            this.session = null;
+            this.click = index -> {
+                if (this.session != null) {
+                    callback.on(index, this.session.state(), this.session.context());
                 }
             };
         }
 
         public void init(Vector2i dimension, List<GuiEventListener> listeners, Consumer<GuiEventListener> collector) {
             this.existing.clear();
-            this.existingVisible.clear();
             var x0 = dimension.x / 2 - 100;
-            var y0 = dimension.y / 4 + 96 + 12;
-            var y1 = dimension.y / 4 + 120 + 12;
-            this.additional[0] = Button.builder(MUA, b -> this.click.accept(true)).bounds(x0, y0, 200, 20).build();
-            this.additional[1] = Button.builder(NOT_MUA, b -> this.click.accept(false)).bounds(x0, y1, 200, 20).build();
-            collector.accept(this.additional[0]);
-            collector.accept(this.additional[1]);
-            this.additional[0].visible = this.additional[1].visible = false;
-            Streams.instancesOf(AbstractButton.class, listeners).forEach(this.existing::add);
+            var y0 = dimension.y / 4 + 108;
+            var y1 = dimension.y / 4 + 132;
+            var y2 = dimension.y / 4 + 156;
+            collector.accept(this.appended[AUTH] = Button.builder(MUA,
+                    button -> this.click.accept(AUTH)).bounds(x0, y0, 200, 20).build());
+            collector.accept(this.appended[SKIP] = Button.builder(NOT_MUA,
+                    button -> this.click.accept(SKIP)).bounds(x0, y1, 200, 20).build());
+            collector.accept(this.appended[SKIP_FOREVER] = Button.builder(NOT_MUA_FOREVER,
+                    button -> this.click.accept(SKIP_FOREVER)).bounds(x0, y2, 200, 20).build());
+            Streams.instancesOf(AbstractButton.class, listeners).map(ButtonExisting::new).forEach(this.existing::add);
+            if (this.session == null) {
+                this.appended[AUTH].visible = false;
+                this.appended[SKIP].visible = false;
+                this.appended[SKIP_FOREVER].visible = false;
+            } else {
+                this.existing.replaceAll(ButtonExisting::hide);
+                this.appended[AUTH].visible = true;
+                this.appended[SKIP].visible = true;
+                this.appended[SKIP_FOREVER].visible = this.session.includeHideForever();
+            }
         }
 
-        public void show(OAuthState state, IPayloadContext context) {
-            this.connection = Pair.of(state, context);
-            for (var i = 0; i < this.existing.size(); i++) {
-                this.existingVisible.set(i, this.existing.get(i).visible);
-                this.existing.get(i).visible = false;
+        public void show(OAuthState state, boolean includeHideForever, IPayloadContext context) {
+            if (this.session == null) {
+                this.session = new MUAClientSession(state, includeHideForever, context);
+                this.existing.replaceAll(ButtonExisting::hide);
+                this.appended[AUTH].visible = true;
+                this.appended[SKIP].visible = true;
+                this.appended[SKIP_FOREVER].visible = includeHideForever;
             }
-            this.additional[0].visible = this.additional[1].visible = true;
         }
 
         public void hide() {
-            if (this.connection != null) {
-                for (var i = 0; i < this.existing.size(); i++) {
-                    this.existing.get(i).visible = this.existingVisible.get(i);
-                }
-                this.connection = null;
-                this.existingVisible.clear();
-                this.additional[0].visible = this.additional[1].visible = false;
+            if (this.session != null) {
+                this.session = null;
+                this.existing.replaceAll(ButtonExisting::show);
+                this.appended[AUTH].visible = false;
+                this.appended[SKIP].visible = false;
+                this.appended[SKIP_FOREVER].visible = false;
             }
         }
 
         public void cancel() {
-            this.click.accept(false);
+            this.click.accept(SKIP);
         }
 
         @Override
         public void close() {
+            this.session = null;
             this.existing.clear();
-            this.connection = null;
-            this.existingVisible.clear();
-            this.click = BooleanConsumer.nop();
-            Arrays.fill(this.additional, null);
+            this.click = i -> Preconditions.checkState(i >= 0 && i <= SIZE);
+            this.appended[AUTH] = this.appended[SKIP] = this.appended[SKIP_FOREVER] = null;
+        }
+    }
+
+    @FieldsAreNonnullByDefault
+    @MethodsReturnNonnullByDefault
+    @ParametersAreNonnullByDefault
+    private record ButtonExisting(AbstractButton button, boolean visible) {
+        public ButtonExisting(AbstractButton button) {
+            this(button, false);
+        }
+
+        public ButtonExisting hide() {
+            var result = new ButtonExisting(this.button, this.button.visible);
+            this.button.visible = false;
+            return result;
+        }
+
+        public ButtonExisting show() {
+            var result = new ButtonExisting(this.button, false);
+            this.button.visible = this.visible;
+            return result;
         }
     }
 
     @FunctionalInterface
     @ParametersAreNonnullByDefault
     public interface ButtonsCallback {
-        void on(boolean login, OAuthState state, IPayloadContext context);
+        void on(int index, OAuthState state, IPayloadContext context);
     }
 }
