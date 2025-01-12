@@ -26,11 +26,11 @@ import java.util.Objects;
 @ParametersAreNonnullByDefault
 @Mod(value = MUA2FA.ID, dist = Dist.CLIENT)
 public final class MUA2FAClient {
-    private final ConnectionScreenListener listener;
+    private final ConnectScreenListener listener;
 
     public MUA2FAClient(IEventBus modEventBus, ModContainer container) {
         var v = container.getModInfo().getVersion();
-        this.listener = new ConnectionScreenListener("MUA2FA/" + v);
+        this.listener = new ConnectScreenListener("MUA2FA/" + v);
         modEventBus.addListener(FMLClientSetupEvent.class, this::on);
         modEventBus.addListener(RegisterPayloadHandlersEvent.class, this::on);
         NeoForge.EVENT_BUS.addListener(ScreenEvent.Opening.class, this.listener::on);

@@ -7,8 +7,11 @@ import net.minecraft.FieldsAreNonnullByDefault;
 import net.minecraft.MethodsReturnNonnullByDefault;
 import net.minecraft.Util;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.components.AbstractButton;
+import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.MultiLineTextWidget;
 import net.minecraft.client.gui.components.events.GuiEventListener;
 import net.minecraft.client.gui.screens.ConnectScreen;
 import net.minecraft.client.resources.language.I18n;
@@ -52,7 +55,7 @@ import java.util.function.IntConsumer;
 @FieldsAreNonnullByDefault
 @MethodsReturnNonnullByDefault
 @ParametersAreNonnullByDefault
-public final class ConnectionScreenListener {
+public final class ConnectScreenListener {
     private static final Marker MARKER = MarkerManager.getMarker("Connection");
 
     private static final Codec<Either<MUARecord, MUAEmptyState>> CODEC;
@@ -72,7 +75,7 @@ public final class ConnectionScreenListener {
     private final Buttons buttons;
     private final String userAgent;
 
-    public ConnectionScreenListener(String userAgent) {
+    public ConnectScreenListener(String userAgent) {
         this.userAgent = userAgent;
         this.buttons = new Buttons();
     }
@@ -93,7 +96,8 @@ public final class ConnectionScreenListener {
 
     public void on(ScreenEvent.Init.Post event) {
         if (event.getScreen() instanceof ConnectScreen screen) {
-            this.buttons.init(new Vector2i(screen.width, screen.height), event.getListenersList(), event::addListener);
+            this.buttons.init(new Vector2i(screen.width, screen.height),
+                    screen.getMinecraft().font, event.getListenersList(), event::addListener);
         }
     }
 
@@ -236,17 +240,18 @@ public final class ConnectionScreenListener {
     @MethodsReturnNonnullByDefault
     @ParametersAreNonnullByDefault
     private static final class Buttons implements Closeable {
-        public static final int AUTH = 0, SKIP = 1, SKIP_FOREVER = 2, SIZE = 3;
+        public static final int AUTH = 0, SKIP = 1, HINT_TITLE = 2, SKIP_FOREVER = 3, SIZE = 4;
 
         private static final Component MUA = Component.translatable("mua2fa.login_as_mua");
         private static final Component NOT_MUA = Component.translatable("mua2fa.not_login_as_mua");
-        private static final Component NOT_MUA_FOREVER = Component.translatable("mua2fa.not_login_as_mua_forever");
+        private static final Component REQ_HINT = Component.translatable("mua2fa.mua_request_hint");
+        private static final Component NOT_FOREVER = Component.translatable("mua2fa.not_login_as_mua_forever");
 
         private @Nullable MUAClientSession session;
         private IntConsumer click = i -> Preconditions.checkState(i >= 0 && i <= SIZE);
 
-        private final Button[] appended = new Button[SIZE];
         private final List<ButtonExisting> existing = new ArrayList<>(1);
+        private final AbstractWidget[] appended = new AbstractWidget[SIZE];
 
         public void open(ButtonsCallback callback) {
             this.session = null;
@@ -257,27 +262,34 @@ public final class ConnectionScreenListener {
             };
         }
 
-        public void init(Vector2i dimension, List<GuiEventListener> listeners, Consumer<GuiEventListener> collector) {
+        public void init(Vector2i dimension, Font font,
+                         List<GuiEventListener> listeners,
+                         Consumer<GuiEventListener> collector) {
             this.existing.clear();
             var x0 = dimension.x / 2 - 100;
             var y0 = dimension.y / 4 + 108;
             var y1 = dimension.y / 4 + 132;
             var y2 = dimension.y / 4 + 156;
+            var y3 = dimension.y / 2 - 23;
             collector.accept(this.appended[AUTH] = Button.builder(MUA,
                     button -> this.click.accept(AUTH)).bounds(x0, y0, 200, 20).build());
             collector.accept(this.appended[SKIP] = Button.builder(NOT_MUA,
                     button -> this.click.accept(SKIP)).bounds(x0, y1, 200, 20).build());
-            collector.accept(this.appended[SKIP_FOREVER] = Button.builder(NOT_MUA_FOREVER,
+            collector.accept(this.appended[HINT_TITLE] = Util.make(new MultiLineTextWidget(100, y3, REQ_HINT, font),
+                    str -> str.setCentered(true).setMaxRows(4).setColor(0xAAAAAA).setX(x0 - str.getWidth() / 2 + 100)));
+            collector.accept(this.appended[SKIP_FOREVER] = Button.builder(NOT_FOREVER,
                     button -> this.click.accept(SKIP_FOREVER)).bounds(x0, y2, 200, 20).build());
             Streams.instancesOf(AbstractButton.class, listeners).map(ButtonExisting::new).forEach(this.existing::add);
             if (this.session == null) {
                 this.appended[AUTH].visible = false;
                 this.appended[SKIP].visible = false;
+                this.appended[HINT_TITLE].visible = false;
                 this.appended[SKIP_FOREVER].visible = false;
             } else {
                 this.existing.replaceAll(ButtonExisting::hide);
                 this.appended[AUTH].visible = true;
                 this.appended[SKIP].visible = true;
+                this.appended[HINT_TITLE].visible = true;
                 this.appended[SKIP_FOREVER].visible = this.session.includeHideForever();
             }
         }
@@ -288,6 +300,7 @@ public final class ConnectionScreenListener {
                 this.existing.replaceAll(ButtonExisting::hide);
                 this.appended[AUTH].visible = true;
                 this.appended[SKIP].visible = true;
+                this.appended[HINT_TITLE].visible = true;
                 this.appended[SKIP_FOREVER].visible = includeHideForever;
             }
         }
@@ -298,6 +311,7 @@ public final class ConnectionScreenListener {
                 this.existing.replaceAll(ButtonExisting::show);
                 this.appended[AUTH].visible = false;
                 this.appended[SKIP].visible = false;
+                this.appended[HINT_TITLE].visible = false;
                 this.appended[SKIP_FOREVER].visible = false;
             }
         }
@@ -311,7 +325,7 @@ public final class ConnectionScreenListener {
             this.session = null;
             this.existing.clear();
             this.click = i -> Preconditions.checkState(i >= 0 && i <= SIZE);
-            this.appended[AUTH] = this.appended[SKIP] = this.appended[SKIP_FOREVER] = null;
+            this.appended[AUTH] = this.appended[SKIP] = this.appended[HINT_TITLE] = this.appended[SKIP_FOREVER] = null;
         }
     }
 
